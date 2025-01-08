@@ -52,7 +52,6 @@ def read_item(request: LinkRequest) -> LinkResponse:
     start_time = int(time.time() * 1000)
     logger.info(f"Request: {request}")
 
-    # Check is string is url
     if not (request.url.startswith("http://") or request.url.startswith("https://")):
         return LinkResponse.invalid(request.url)
 
@@ -69,7 +68,7 @@ def read_item(request: LinkRequest) -> LinkResponse:
         try:
             sb: BaseCase
             
-            # Set headers before any request
+            # Set headers for navigation
             if request.headers:
                 sb.driver.execute_cdp_cmd('Network.setExtraHTTPHeaders', {
                     'headers': request.headers
@@ -97,6 +96,19 @@ def read_item(request: LinkRequest) -> LinkResponse:
                 sb.save_screenshot(f"./screenshots/{request.url}.png")
                 raise_captcha_bypass_error()
 
+            # If it's a POST request, use fetch API with headers
+            if request.cmd == "request.post" and request.postData:
+                script = f"""
+                return fetch('{request.url}', {{
+                    method: 'POST',
+                    headers: {json.dumps(request.headers)},
+                    body: JSON.stringify({json.dumps(request.postData)}),
+                    credentials: 'include'
+                }}).then(response => response.text())
+                  .catch(error => 'Error: ' + error.message);
+                """
+                source = sb.execute_script(script)
+
             response = LinkResponse(
                 message="Success",
                 solution=Solution(
@@ -104,7 +116,7 @@ def read_item(request: LinkRequest) -> LinkResponse:
                     url=sb.get_current_url(),
                     status=200,
                     cookies=sb.get_cookies(),
-                    headers=request.headers if request.headers else {},  # Return the headers we used
+                    headers=request.headers if request.headers else {},
                     response=source,
                 ),
                 startTimestamp=start_time,
