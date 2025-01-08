@@ -107,36 +107,31 @@ def read_item(request: LinkRequest) -> LinkResponse:
                 # Ensure required headers are present
                 headers = request.headers or {}
                 
-                # Create XMLHttpRequest instead of using fetch
+                # Simpler XHR script
                 script = f"""
-                var done = arguments[0];
-                
-                var xhr = new XMLHttpRequest();
-                xhr.open('POST', '{request.url}', true);
-                
-                // Set headers
-                {' '.join([f"xhr.setRequestHeader('{k}', '{v}');" for k, v in headers.items()])}
-                
-                xhr.onload = function() {{
-                    done({{
-                        status: xhr.status,
-                        text: xhr.responseText
-                    }});
-                }};
-                
-                xhr.onerror = function() {{
-                    done({{
-                        status: 500,
-                        text: 'XHR Error'
-                    }});
-                }};
-                
-                xhr.send(JSON.stringify({json.dumps(request.postData)}));
+                return new Promise((resolve) => {{
+                    var xhr = new XMLHttpRequest();
+                    xhr.open('POST', '{request.url}', true);
+                    
+                    // Set headers
+                    {' '.join([f"xhr.setRequestHeader('{k}', '{v}');" for k, v in headers.items()])}
+                    
+                    xhr.onreadystatechange = function() {{
+                        if (xhr.readyState === 4) {{
+                            resolve({{
+                                status: xhr.status,
+                                text: xhr.responseText
+                            }});
+                        }}
+                    }};
+                    
+                    xhr.send(JSON.stringify({json.dumps(request.postData)}));
+                }});
                 """
                 
                 logger.info("Executing POST request...")
                 try:
-                    result = sb.driver.execute_async_script(script, timeout=30000)  # 30 second timeout
+                    result = sb.execute_script(script)
                     logger.info(f"POST request completed with status: {result.get('status', 'unknown')}")
                     source = result.get('text', '')
                     status = result.get('status', 500)
