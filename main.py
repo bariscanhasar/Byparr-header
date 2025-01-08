@@ -55,75 +55,125 @@ def read_item(request: LinkRequest) -> LinkResponse:
     logger.info(f"  URL: {request.url}")
     logger.info(f"  Method: {request.cmd}")
     logger.info(f"  Post Data: {request.postData}")
-    logger.info(f"  Headers:")
-    if request.headers:
-        for header_name, header_value in request.headers.items():
-            logger.info(f"    {header_name}: {header_value}")
 
     if not (request.url.startswith("http://") or request.url.startswith("https://")):
         return LinkResponse.invalid(request.url)
 
-    with SB(
-        uc=True,
-        locale_code="en",
-        test=False,
-        ad_block=True,
-        xvfb=USE_XVFB,
-        headless=USE_HEADLESS,
-    ) as sb:
+    options = {
+        "uc": True,
+        "locale_code": "en",
+        "test": False,
+        "ad_block": True,
+        "xvfb": USE_XVFB,
+        "headless": USE_HEADLESS,
+        "page_load_strategy": "eager",
+        "undetected": True,
+        "seleniumwire_options": {
+            'verify_ssl': False,
+            'disable_encoding': True
+        }
+    }
+
+    with SB(**options) as sb:
         try:
+            # Disable webdriver flags
+            sb.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+            
+            # Set stealth JS
+            stealth_js = """
+            () => {
+                const newProto = navigator.__proto__;
+                delete newProto.webdriver;
+                navigator.__proto__ = newProto;
+                
+                window.chrome = {
+                    runtime: {},
+                };
+                
+                Object.defineProperty(navigator, 'languages', {
+                    get: () => ['en-US', 'en']
+                });
+            }
+            """
+            sb.driver.execute_script(stealth_js)
+
             if request.headers:
-                sb.driver.execute_cdp_cmd('Network.setExtraHTTPHeaders', {
-                    'headers': request.headers
-                })
+                # Add some additional headers that help with Cloudflare
+                headers = {
+                    **request.headers,
+                    'Cache-Control': 'no-cache',
+                    'Pragma': 'no-cache',
+                    'sec-ch-ua': '"Chromium";v="121", "Not A(Brand";v="99"',
+                    'sec-ch-ua-mobile': '?0',
+                    'sec-ch-ua-platform': '"Windows"',
+                    'Upgrade-Insecure-Requests': '1',
+                }
+                sb.driver.execute_cdp_cmd('Network.setExtraHTTPHeaders', {'headers': headers})
 
             global cookies
             if cookies:
-                sb.uc_open_with_reconnect(request.url)
                 sb.add_cookies(cookies)
             
+            # Initial page load
             sb.uc_open_with_reconnect(request.url)
-            source = sb.get_page_source()
+            time.sleep(5)  # Give some time for initial JS to load
             
-            # Log full page source for debugging
-            logger.debug("Full page source:")
-            logger.debug(source)
-            
-            source_bs = BeautifulSoup(source, "html.parser")
-            title_tag = source_bs.title
-            
-            logger.debug(f"Got webpage: {request.url}")
-            if title_tag and title_tag.string in src.utils.consts.CHALLENGE_TITLES:
-                logger.debug("Challenge detected")
-                sb.uc_gui_click_captcha()
-                logger.info("Clicked captcha")
-                
+            # Handle Cloudflare
+            max_retries = 3
+            for attempt in range(max_retries):
                 source = sb.get_page_source()
-                # Log source after captcha attempt
-                logger.debug("Page source after captcha:")
-                logger.debug(source)
-                
                 source_bs = BeautifulSoup(source, "html.parser")
                 title_tag = source_bs.title
                 
-                if title_tag and title_tag.string in src.utils.consts.CHALLENGE_TITLES:
-                    sb.save_screenshot(f"./screenshots/{request.url}.png")
-                    raise_captcha_bypass_error()
+                if not (title_tag and title_tag.string in src.utils.consts.CHALLENGE_TITLES):
+                    break
+                
+                logger.debug(f"Challenge detected (attempt {attempt + 1}/{max_retries})")
+                
+                # Try to solve challenge
+                try:
+                    # Look for iframe first
+                    iframes = sb.driver.find_elements("xpath", "//iframe")
+                    for iframe in iframes:
+                        try:
+                            sb.driver.switch_to.frame(iframe)
+                            checkbox = sb.driver.find_element("css selector", "#checkbox")
+                            if checkbox.is_displayed():
+                                checkbox.click()
+                                logger.info("Clicked challenge checkbox")
+                                time.sleep(2)
+                            sb.driver.switch_to.default_content()
+                        except:
+                            sb.driver.switch_to.default_content()
+                            continue
+                    
+                    # Try standard captcha click
+                    sb.uc_gui_click_captcha()
+                    logger.info("Clicked standard captcha")
+                except Exception as e:
+                    logger.debug(f"Captcha interaction failed: {e}")
+                
+                time.sleep(5)  # Wait for challenge to process
+            
+            # Check if we're still on challenge page
+            source = sb.get_page_source()
+            if "Just a moment" in source or "challenge-running" in source:
+                sb.save_screenshot(f"./screenshots/{request.url}.png")
+                raise_captcha_bypass_error()
 
+            # Handle POST request if needed
             if request.cmd == "request.post" and request.postData:
                 script = f"""
                 return fetch('{request.url}', {{
                     method: 'POST',
-                    headers: {json.dumps(request.headers)} || {{}},
+                    headers: {json.dumps(headers)},
                     body: JSON.stringify({json.dumps(request.postData)}),
-                    credentials: 'include'
+                    credentials: 'include',
+                    mode: 'cors'
                 }}).then(response => response.text())
                   .catch(error => 'Error: ' + error.message);
                 """
                 source = sb.execute_script(script)
-                # Log fetch response
-                logger.debug("Fetch response:")
-                logger.debug(source)
 
             response = LinkResponse(
                 message="Success",
@@ -132,7 +182,7 @@ def read_item(request: LinkRequest) -> LinkResponse:
                     url=sb.get_current_url(),
                     status=200,
                     cookies=sb.get_cookies(),
-                    headers=request.headers if request.headers else {},
+                    headers=headers if request.headers else {},
                     response=source,
                 ),
                 startTimestamp=start_time,
@@ -142,7 +192,6 @@ def read_item(request: LinkRequest) -> LinkResponse:
 
         except Exception as e:
             logger.error(f"Error: {e}")
-            logger.error(f"Full error details: {str(e)}")
             if sb.driver:
                 sb.driver.quit()
             raise HTTPException(
