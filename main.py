@@ -51,7 +51,6 @@ def read_item(request: LinkRequest) -> LinkResponse:
     """Handle POST requests."""
     start_time = int(time.time() * 1000)
     
-    # Log the incoming request details
     logger.info(f"Incoming request details:")
     logger.info(f"  URL: {request.url}")
     logger.info(f"  Method: {request.cmd}")
@@ -61,7 +60,6 @@ def read_item(request: LinkRequest) -> LinkResponse:
         for header_name, header_value in request.headers.items():
             logger.info(f"    {header_name}: {header_value}")
 
-    # URL validation
     if not (request.url.startswith("http://") or request.url.startswith("https://")):
         return LinkResponse.invalid(request.url)
 
@@ -72,50 +70,39 @@ def read_item(request: LinkRequest) -> LinkResponse:
         ad_block=True,
         xvfb=USE_XVFB,
         headless=USE_HEADLESS,
-        page_load_strategy='eager',
-        uc_cdp=True,
     ) as sb:
         try:
             # Set custom headers
             if request.headers:
-                for header_name, header_value in request.headers.items():
-                    sb.driver.execute_cdp_cmd('Network.setExtraHTTPHeaders', {
-                        'headers': {header_name: header_value}
-                    })
+                sb.driver.execute_cdp_cmd('Network.setExtraHTTPHeaders', {
+                    'headers': request.headers
+                })
 
             global cookies
             if cookies:
+                sb.uc_open_with_reconnect(request.url)
                 sb.add_cookies(cookies)
             
-            # First visit to handle Cloudflare
             sb.uc_open_with_reconnect(request.url)
+            source = sb.get_page_source()
+            source_bs = BeautifulSoup(source, "html.parser")
+            title_tag = source_bs.title
             
-            # Wait for Cloudflare challenge to complete (up to 30 seconds)
-            max_wait = 30
-            start = time.time()
-            while time.time() - start < max_wait:
+            logger.debug(f"Got webpage: {request.url}")
+            if title_tag and title_tag.string in src.utils.consts.CHALLENGE_TITLES:
+                logger.debug("Challenge detected")
+                sb.uc_gui_click_captcha()
+                logger.info("Clicked captcha")
+                
                 source = sb.get_page_source()
                 source_bs = BeautifulSoup(source, "html.parser")
                 title_tag = source_bs.title
                 
-                if not title_tag or title_tag.string not in src.utils.consts.CHALLENGE_TITLES:
-                    break  # Challenge completed
-                
-                if "Just a moment" in source:
-                    logger.info("Waiting for Cloudflare challenge to complete...")
-                    time.sleep(2)
-                    continue
-                
-                # Try to solve challenge if interactive elements are present
-                try:
-                    sb.uc_gui_click_captcha()
-                    logger.info("Clicked captcha")
-                except:
-                    pass
-                
-                time.sleep(2)
-            
-            # After bypass, if it's a POST request, execute it
+                if title_tag and title_tag.string in src.utils.consts.CHALLENGE_TITLES:
+                    sb.save_screenshot(f"./screenshots/{request.url}.png")
+                    raise_captcha_bypass_error()
+
+            # After successful bypass, handle POST request if needed
             if request.cmd == "request.post" and request.postData:
                 script = f"""
                 return fetch('{request.url}', {{
