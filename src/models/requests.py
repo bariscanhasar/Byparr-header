@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 from http import HTTPStatus
-from typing import Any
+from typing import Any, Dict, Optional
 
 from pydantic import BaseModel, Field
 
@@ -10,9 +10,11 @@ from src.utils import consts
 
 
 class LinkRequest(BaseModel):
-    cmd: str = "get"
     url: str
-    max_timeout: int = Field(30, alias="maxTimeout")
+    max_timeout: Optional[int] = 60
+    cmd: Optional[str] = "request.get"
+    headers: Optional[Dict[str, str]] = None
+    postData: Optional[Dict[str, Any]] = None
 
 
 class ProtectionTriggeredError(Exception):

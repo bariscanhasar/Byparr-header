@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import time
 from http import HTTPStatus
+import json
 
 import uvicorn
 from bs4 import BeautifulSoup
@@ -49,16 +50,21 @@ async def health_check():
 def read_item(request: LinkRequest) -> LinkResponse:
     """Handle POST requests."""
     start_time = int(time.time() * 1000)
-    # request.url = "https://nowsecure.nl"
-    logger.info(f"Request: {request}")
+    
+    # Log the incoming request details
+    logger.info(f"Incoming request details:")
+    logger.info(f"  URL: {request.url}")
+    logger.info(f"  Method: {request.cmd}")
+    logger.info(f"  Post Data: {request.postData}")
+    logger.info(f"  Headers:")
+    if request.headers:
+        for header_name, header_value in request.headers.items():
+            logger.info(f"    {header_name}: {header_value}")
 
-    # Check is string is url
+    # URL validation
     if not (request.url.startswith("http://") or request.url.startswith("https://")):
         return LinkResponse.invalid(request.url)
 
-    response: LinkResponse
-
-    # start_time = int(time.time() * 1000)
     with SB(
         uc=True,
         locale_code="en",
@@ -68,28 +74,49 @@ def read_item(request: LinkRequest) -> LinkResponse:
         headless=USE_HEADLESS,
     ) as sb:
         try:
-            sb: BaseCase
-            global cookies  # noqa: PLW0603
+            # Set custom headers
+            if request.headers:
+                for header_name, header_value in request.headers.items():
+                    sb.driver.execute_cdp_cmd('Network.setExtraHTTPHeaders', {
+                        'headers': {header_name: header_value}
+                    })
+
+            global cookies
             if cookies:
                 sb.uc_open_with_reconnect(request.url)
                 sb.add_cookies(cookies)
+            
+            # Always use uc_open_with_reconnect for Cloudflare bypass
             sb.uc_open_with_reconnect(request.url)
+            
+            # Handle Cloudflare challenge if present
             source = sb.get_page_source()
             source_bs = BeautifulSoup(source, "html.parser")
             title_tag = source_bs.title
-            logger.debug(f"Got webpage: {request.url}")
+            
             if title_tag and title_tag.string in src.utils.consts.CHALLENGE_TITLES:
                 logger.debug("Challenge detected")
                 sb.uc_gui_click_captcha()
                 logger.info("Clicked captcha")
+                
+                source = sb.get_page_source()
+                source_bs = BeautifulSoup(source, "html.parser")
+                title_tag = source_bs.title
+                
+                if title_tag and title_tag.string in src.utils.consts.CHALLENGE_TITLES:
+                    sb.save_screenshot(f"./screenshots/{request.url}.png")
+                    raise_captcha_bypass_error()
 
-            source = sb.get_page_source()
-            source_bs = BeautifulSoup(source, "html.parser")
-            title_tag = source_bs.title
-
-            if title_tag and title_tag.string in src.utils.consts.CHALLENGE_TITLES:
-                sb.save_screenshot(f"./screenshots/{request.url}.png")
-                raise_captcha_bypass_error()
+            # After bypass, if it's a POST request, execute it
+            if request.cmd == "request.post" and request.postData:
+                script = f"""
+                return fetch('{request.url}', {{
+                    method: 'POST',
+                    headers: {json.dumps(request.headers)} || {{}},
+                    body: JSON.stringify({json.dumps(request.postData)})
+                }}).then(response => response.text());
+                """
+                source = sb.execute_script(script)
 
             response = LinkResponse(
                 message="Success",
@@ -98,21 +125,21 @@ def read_item(request: LinkRequest) -> LinkResponse:
                     url=sb.get_current_url(),
                     status=200,
                     cookies=sb.get_cookies(),
-                    headers={},
+                    headers=request.headers if request.headers else {},
                     response=source,
                 ),
                 startTimestamp=start_time,
             )
             cookies = sb.get_cookies()
+            return response
+
         except Exception as e:
             logger.error(f"Error: {e}")
             if sb.driver:
                 sb.driver.quit()
             raise HTTPException(
-                status_code=500, detail="Unknown error, check logs"
+                status_code=500, detail=str(e)
             ) from e
-
-    return response
 
 
 def raise_captcha_bypass_error():
