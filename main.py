@@ -72,7 +72,6 @@ def read_item(request: LinkRequest) -> LinkResponse:
         headless=USE_HEADLESS,
     ) as sb:
         try:
-            # Set custom headers
             if request.headers:
                 sb.driver.execute_cdp_cmd('Network.setExtraHTTPHeaders', {
                     'headers': request.headers
@@ -85,6 +84,11 @@ def read_item(request: LinkRequest) -> LinkResponse:
             
             sb.uc_open_with_reconnect(request.url)
             source = sb.get_page_source()
+            
+            # Log full page source for debugging
+            logger.debug("Full page source:")
+            logger.debug(source)
+            
             source_bs = BeautifulSoup(source, "html.parser")
             title_tag = source_bs.title
             
@@ -95,6 +99,10 @@ def read_item(request: LinkRequest) -> LinkResponse:
                 logger.info("Clicked captcha")
                 
                 source = sb.get_page_source()
+                # Log source after captcha attempt
+                logger.debug("Page source after captcha:")
+                logger.debug(source)
+                
                 source_bs = BeautifulSoup(source, "html.parser")
                 title_tag = source_bs.title
                 
@@ -102,7 +110,6 @@ def read_item(request: LinkRequest) -> LinkResponse:
                     sb.save_screenshot(f"./screenshots/{request.url}.png")
                     raise_captcha_bypass_error()
 
-            # After successful bypass, handle POST request if needed
             if request.cmd == "request.post" and request.postData:
                 script = f"""
                 return fetch('{request.url}', {{
@@ -110,9 +117,13 @@ def read_item(request: LinkRequest) -> LinkResponse:
                     headers: {json.dumps(request.headers)} || {{}},
                     body: JSON.stringify({json.dumps(request.postData)}),
                     credentials: 'include'
-                }}).then(response => response.text());
+                }}).then(response => response.text())
+                  .catch(error => 'Error: ' + error.message);
                 """
                 source = sb.execute_script(script)
+                # Log fetch response
+                logger.debug("Fetch response:")
+                logger.debug(source)
 
             response = LinkResponse(
                 message="Success",
@@ -131,6 +142,7 @@ def read_item(request: LinkRequest) -> LinkResponse:
 
         except Exception as e:
             logger.error(f"Error: {e}")
+            logger.error(f"Full error details: {str(e)}")
             if sb.driver:
                 sb.driver.quit()
             raise HTTPException(
