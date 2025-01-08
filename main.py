@@ -67,11 +67,7 @@ def read_item(request: LinkRequest) -> LinkResponse:
         "xvfb": USE_XVFB,
         "headless": USE_HEADLESS,
         "page_load_strategy": "eager",
-        "undetected": True,
-        "seleniumwire_options": {
-            'verify_ssl': False,
-            'disable_encoding': True
-        }
+        "undetected": True
     }
 
     with SB(**options) as sb:
