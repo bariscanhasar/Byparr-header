@@ -68,7 +68,7 @@ def read_item(request: LinkRequest) -> LinkResponse:
         try:
             sb: BaseCase
             
-            # First, let's bypass Cloudflare using a GET request
+            # First bypass Cloudflare
             bypass_url = "/".join(request.url.split("/")[:3])  # Get base domain
             logger.info(f"Attempting to bypass Cloudflare at: {bypass_url}")
             
@@ -76,61 +76,81 @@ def read_item(request: LinkRequest) -> LinkResponse:
             if cookies:
                 sb.add_cookies(cookies)
             
-            # Initial GET request to handle Cloudflare
+            # Initial visit to handle Cloudflare
             sb.uc_open_with_reconnect(bypass_url)
-            time.sleep(3)  # Give it some time to load
             
-            source = sb.get_page_source()
-            source_bs = BeautifulSoup(source, "html.parser")
-            title_tag = source_bs.title
-            
-            if title_tag and title_tag.string in src.utils.consts.CHALLENGE_TITLES:
-                logger.debug("Challenge detected")
-                sb.uc_gui_click_captcha()
-                logger.info("Clicked captcha")
-                time.sleep(5)  # Wait for challenge completion
-
+            # Handle Cloudflare challenge
+            max_retries = 3
+            for _ in range(max_retries):
                 source = sb.get_page_source()
                 source_bs = BeautifulSoup(source, "html.parser")
                 title_tag = source_bs.title
-
-                if title_tag and title_tag.string in src.utils.consts.CHALLENGE_TITLES:
-                    sb.save_screenshot(f"./screenshots/{bypass_url}.png")
-                    raise_captcha_bypass_error()
+                
+                if not (title_tag and title_tag.string in src.utils.consts.CHALLENGE_TITLES):
+                    break
+                
+                logger.debug("Challenge detected")
+                sb.uc_gui_click_captcha()
+                logger.info("Clicked captcha")
+                time.sleep(3)
             
-            # Store cookies after successful bypass
+            # Store cookies after bypass
             cookies = sb.get_cookies()
             
-            # Now make the actual POST request with fetch
+            # Now handle the POST request in a new tab
             if request.cmd == "request.post" and request.postData:
-                # Set up the headers for the fetch request
-                headers = request.headers or {}
+                # Create a new tab
+                sb.driver.execute_script("window.open('about:blank', '_blank');")
+                sb.driver.switch_to.window(sb.driver.window_handles[-1])
+                
+                # Add cookies to new tab
+                for cookie in cookies:
+                    sb.add_cookie(cookie)
+                
+                # Navigate to the URL first
+                sb.uc_open_with_reconnect(request.url)
+                
+                # Prepare the POST request
+                headers_str = json.dumps(request.headers)
+                post_data_str = json.dumps(request.postData)
                 
                 script = f"""
-                return fetch('{request.url}', {{
-                    method: 'POST',
-                    headers: {json.dumps(headers)},
-                    body: JSON.stringify({json.dumps(request.postData)}),
-                    credentials: 'include'
-                }}).then(async response => {{
-                    const text = await response.text();
-                    return JSON.stringify({{
-                        status: response.status,
-                        text: text
-                    }});
-                }}).catch(error => JSON.stringify({{
-                    status: 500,
-                    text: 'Error: ' + error.message
-                }}));
+                async function makeRequest() {{
+                    try {{
+                        const response = await fetch('{request.url}', {{
+                            method: 'POST',
+                            headers: {headers_str},
+                            body: JSON.stringify({post_data_str}),
+                            credentials: 'include'
+                        }});
+                        
+                        const text = await response.text();
+                        return {{
+                            status: response.status,
+                            text: text
+                        }};
+                    }} catch (error) {{
+                        return {{
+                            status: 500,
+                            text: 'Error: ' + error.message
+                        }};
+                    }}
+                }}
+                return makeRequest();
                 """
-                result = sb.execute_script(script)
-                try:
-                    result_json = json.loads(result)
-                    source = result_json['text']
-                    status = result_json['status']
-                except:
-                    source = result
-                    status = 200
+                
+                result = sb.driver.execute_async_script("""
+                const callback = arguments[arguments.length - 1];
+                const makeRequest = """ + script + """
+                makeRequest().then(callback);
+                """)
+                
+                source = result.get('text', '')
+                status = result.get('status', 500)
+                
+                # Close the tab
+                sb.driver.close()
+                sb.driver.switch_to.window(sb.driver.window_handles[0])
             else:
                 source = sb.get_page_source()
                 status = 200
