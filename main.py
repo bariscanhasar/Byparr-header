@@ -106,50 +106,47 @@ def read_item(request: LinkRequest) -> LinkResponse:
                 
                 # Ensure required headers are present
                 headers = request.headers or {}
-                if 'authorization' not in {k.lower(): v for k, v in headers.items()}:
-                    logger.warning("Authorization header missing")
                 
+                # Create XMLHttpRequest instead of using fetch
                 script = f"""
-                async function makeRequest() {{
-                    try {{
-                        const response = await fetch('{request.url}', {{
-                            method: 'POST',
-                            headers: {json.dumps(headers)},
-                            body: JSON.stringify({json.dumps(request.postData)}),
-                        }});
-                        
-                        const text = await response.text();
-                        return {{
-                            status: response.status,
-                            text: text,
-                            headers: Object.fromEntries([...response.headers])
-                        }};
-                    }} catch (error) {{
-                        return {{
-                            status: 500,
-                            text: 'Error: ' + error.message,
-                            headers: {{}}
-                        }};
-                    }}
-                }}
-                return makeRequest();
+                var done = arguments[0];
+                
+                var xhr = new XMLHttpRequest();
+                xhr.open('POST', '{request.url}', true);
+                
+                // Set headers
+                {' '.join([f"xhr.setRequestHeader('{k}', '{v}');" for k, v in headers.items()])}
+                
+                xhr.onload = function() {{
+                    done({{
+                        status: xhr.status,
+                        text: xhr.responseText
+                    }});
+                }};
+                
+                xhr.onerror = function() {{
+                    done({{
+                        status: 500,
+                        text: 'XHR Error'
+                    }});
+                }};
+                
+                xhr.send(JSON.stringify({json.dumps(request.postData)}));
                 """
                 
                 logger.info("Executing POST request...")
-                result = sb.driver.execute_async_script("""
-                const callback = arguments[arguments.length - 1];
-                const makeRequest = """ + script + """
-                makeRequest().then(callback);
-                """)
-                
-                logger.info(f"POST request completed with status: {result.get('status', 'unknown')}")
-                source = result.get('text', '')
-                status = result.get('status', 500)
-                response_headers = result.get('headers', {})
+                try:
+                    result = sb.driver.execute_async_script(script, timeout=30000)  # 30 second timeout
+                    logger.info(f"POST request completed with status: {result.get('status', 'unknown')}")
+                    source = result.get('text', '')
+                    status = result.get('status', 500)
+                except Exception as e:
+                    logger.error(f"POST request failed: {e}")
+                    source = str(e)
+                    status = 500
             else:
                 source = sb.get_page_source()
                 status = 200
-                response_headers = {}
 
             response = LinkResponse(
                 message="Success",
@@ -157,7 +154,7 @@ def read_item(request: LinkRequest) -> LinkResponse:
                     userAgent=sb.get_user_agent(),
                     url=sb.get_current_url(),
                     status=status,
-                    cookies=[],  # Empty list instead of empty dict
+                    cookies=[],
                     headers=request.headers if request.headers else {},
                     response=source,
                 ),
