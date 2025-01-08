@@ -50,14 +50,13 @@ async def health_check():
 def read_item(request: LinkRequest) -> LinkResponse:
     """Handle POST requests."""
     start_time = int(time.time() * 1000)
-    
-    logger.info(f"Incoming request details:")
-    logger.info(f"  URL: {request.url}")
-    logger.info(f"  Method: {request.cmd}")
-    logger.info(f"  Post Data: {request.postData}")
+    logger.info(f"Request: {request}")
 
+    # Check is string is url
     if not (request.url.startswith("http://") or request.url.startswith("https://")):
         return LinkResponse.invalid(request.url)
+
+    response: LinkResponse
 
     with SB(
         uc=True,
@@ -68,56 +67,35 @@ def read_item(request: LinkRequest) -> LinkResponse:
         headless=USE_HEADLESS,
     ) as sb:
         try:
-            # Set basic headers
+            sb: BaseCase
+            
+            # Set headers before any request
             if request.headers:
                 sb.driver.execute_cdp_cmd('Network.setExtraHTTPHeaders', {
                     'headers': request.headers
                 })
-
-            # First visit to get cookies
-            sb.uc_open_with_reconnect(request.url)
-            time.sleep(3)  # Wait for initial load
             
-            # Get and store cookies from first visit
-            global cookies
-            current_cookies = sb.get_cookies()
-            
-            # Add existing cookies if available
+            global cookies  # noqa: PLW0603
             if cookies:
-                for cookie in cookies:
-                    sb.add_cookie(cookie)
-            
-            # Second visit with cookies
+                sb.uc_open_with_reconnect(request.url)
+                sb.add_cookies(cookies)
             sb.uc_open_with_reconnect(request.url)
             source = sb.get_page_source()
-            
-            # Handle Cloudflare if present
-            if "Just a moment" in source or "challenge-running" in source:
+            source_bs = BeautifulSoup(source, "html.parser")
+            title_tag = source_bs.title
+            logger.debug(f"Got webpage: {request.url}")
+            if title_tag and title_tag.string in src.utils.consts.CHALLENGE_TITLES:
                 logger.debug("Challenge detected")
                 sb.uc_gui_click_captcha()
                 logger.info("Clicked captcha")
-                time.sleep(5)  # Wait for challenge completion
-                
-                source = sb.get_page_source()
-                if "Just a moment" in source or "challenge-running" in source:
-                    sb.save_screenshot(f"./screenshots/{request.url}.png")
-                    raise_captcha_bypass_error()
 
-            # Handle POST request if needed
-            if request.cmd == "request.post" and request.postData:
-                script = f"""
-                return fetch('{request.url}', {{
-                    method: 'POST',
-                    headers: {json.dumps(request.headers)},
-                    body: JSON.stringify({json.dumps(request.postData)}),
-                    credentials: 'include'
-                }}).then(response => response.text())
-                  .catch(error => 'Error: ' + error.message);
-                """
-                source = sb.execute_script(script)
+            source = sb.get_page_source()
+            source_bs = BeautifulSoup(source, "html.parser")
+            title_tag = source_bs.title
 
-            # Update cookies for future requests
-            cookies = current_cookies
+            if title_tag and title_tag.string in src.utils.consts.CHALLENGE_TITLES:
+                sb.save_screenshot(f"./screenshots/{request.url}.png")
+                raise_captcha_bypass_error()
 
             response = LinkResponse(
                 message="Success",
@@ -125,21 +103,22 @@ def read_item(request: LinkRequest) -> LinkResponse:
                     userAgent=sb.get_user_agent(),
                     url=sb.get_current_url(),
                     status=200,
-                    cookies=cookies,
-                    headers=request.headers if request.headers else {},
+                    cookies=sb.get_cookies(),
+                    headers=request.headers if request.headers else {},  # Return the headers we used
                     response=source,
                 ),
                 startTimestamp=start_time,
             )
-            return response
-
+            cookies = sb.get_cookies()
         except Exception as e:
             logger.error(f"Error: {e}")
             if sb.driver:
                 sb.driver.quit()
             raise HTTPException(
-                status_code=500, detail=str(e)
+                status_code=500, detail="Unknown error, check logs"
             ) from e
+
+    return response
 
 
 def raise_captcha_bypass_error():
