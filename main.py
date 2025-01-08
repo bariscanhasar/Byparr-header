@@ -115,13 +115,31 @@ def read_item(request: LinkRequest) -> LinkResponse:
                 sb.driver.execute_script("window.open('about:blank', '_blank');")
                 sb.driver.switch_to.window(sb.driver.window_handles[-1])
                 
-                # Add cookies to new tab
-                for cookie in cookies:
-                    sb.add_cookie(cookie)
-                
-                # Navigate to the URL first
+                # Navigate to the URL first (before adding cookies)
                 logger.info(f"Navigating to POST URL: {request.url}")
                 sb.uc_open_with_reconnect(request.url)
+                
+                # Add cookies to new tab with proper domain
+                target_domain = request.url.split("/")[2]  # Get domain from URL
+                for cookie in cookies:
+                    try:
+                        cookie_data = {
+                            'name': cookie['name'],
+                            'value': cookie['value'],
+                            'domain': target_domain
+                        }
+                        # Add optional cookie attributes if they exist
+                        for attr in ['path', 'secure', 'expiry']:
+                            if attr in cookie:
+                                cookie_data[attr] = cookie[attr]
+                        sb.driver.add_cookie(cookie_data)
+                        logger.info(f"Added cookie: {cookie['name']} for domain {target_domain}")
+                    except Exception as e:
+                        logger.warning(f"Failed to add cookie {cookie['name']}: {e}")
+                
+                # Refresh page after adding cookies
+                sb.driver.refresh()
+                time.sleep(1)
                 
                 # Prepare the POST request
                 headers_str = json.dumps(request.headers)
