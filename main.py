@@ -59,117 +59,65 @@ def read_item(request: LinkRequest) -> LinkResponse:
     if not (request.url.startswith("http://") or request.url.startswith("https://")):
         return LinkResponse.invalid(request.url)
 
-    options = {
-        "uc": True,
-        "locale_code": "en",
-        "test": False,
-        "ad_block": True,
-        "xvfb": USE_XVFB,
-        "headless": USE_HEADLESS,
-        "page_load_strategy": "eager",
-        "undetected": True
-    }
-
-    with SB(**options) as sb:
+    with SB(
+        uc=True,
+        locale_code="en",
+        test=False,
+        ad_block=True,
+        xvfb=USE_XVFB,
+        headless=USE_HEADLESS,
+    ) as sb:
         try:
-            # Disable webdriver flags
-            sb.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-            
-            # Set stealth JS
-            stealth_js = """
-            () => {
-                const newProto = navigator.__proto__;
-                delete newProto.webdriver;
-                navigator.__proto__ = newProto;
-                
-                window.chrome = {
-                    runtime: {},
-                };
-                
-                Object.defineProperty(navigator, 'languages', {
-                    get: () => ['en-US', 'en']
-                });
-            }
-            """
-            sb.driver.execute_script(stealth_js)
-
+            # Set basic headers
             if request.headers:
-                # Add some additional headers that help with Cloudflare
-                headers = {
-                    **request.headers,
-                    'Cache-Control': 'no-cache',
-                    'Pragma': 'no-cache',
-                    'sec-ch-ua': '"Chromium";v="121", "Not A(Brand";v="99"',
-                    'sec-ch-ua-mobile': '?0',
-                    'sec-ch-ua-platform': '"Windows"',
-                    'Upgrade-Insecure-Requests': '1',
-                }
-                sb.driver.execute_cdp_cmd('Network.setExtraHTTPHeaders', {'headers': headers})
+                sb.driver.execute_cdp_cmd('Network.setExtraHTTPHeaders', {
+                    'headers': request.headers
+                })
 
-            global cookies
-            if cookies:
-                sb.add_cookies(cookies)
-            
-            # Initial page load
+            # First visit to get cookies
             sb.uc_open_with_reconnect(request.url)
-            time.sleep(5)  # Give some time for initial JS to load
+            time.sleep(3)  # Wait for initial load
             
-            # Handle Cloudflare
-            max_retries = 3
-            for attempt in range(max_retries):
-                source = sb.get_page_source()
-                source_bs = BeautifulSoup(source, "html.parser")
-                title_tag = source_bs.title
-                
-                if not (title_tag and title_tag.string in src.utils.consts.CHALLENGE_TITLES):
-                    break
-                
-                logger.debug(f"Challenge detected (attempt {attempt + 1}/{max_retries})")
-                
-                # Try to solve challenge
-                try:
-                    # Look for iframe first
-                    iframes = sb.driver.find_elements("xpath", "//iframe")
-                    for iframe in iframes:
-                        try:
-                            sb.driver.switch_to.frame(iframe)
-                            checkbox = sb.driver.find_element("css selector", "#checkbox")
-                            if checkbox.is_displayed():
-                                checkbox.click()
-                                logger.info("Clicked challenge checkbox")
-                                time.sleep(2)
-                            sb.driver.switch_to.default_content()
-                        except:
-                            sb.driver.switch_to.default_content()
-                            continue
-                    
-                    # Try standard captcha click
-                    sb.uc_gui_click_captcha()
-                    logger.info("Clicked standard captcha")
-                except Exception as e:
-                    logger.debug(f"Captcha interaction failed: {e}")
-                
-                time.sleep(5)  # Wait for challenge to process
+            # Get and store cookies from first visit
+            global cookies
+            current_cookies = sb.get_cookies()
             
-            # Check if we're still on challenge page
+            # Add existing cookies if available
+            if cookies:
+                for cookie in cookies:
+                    sb.add_cookie(cookie)
+            
+            # Second visit with cookies
+            sb.uc_open_with_reconnect(request.url)
             source = sb.get_page_source()
+            
+            # Handle Cloudflare if present
             if "Just a moment" in source or "challenge-running" in source:
-                sb.save_screenshot(f"./screenshots/{request.url}.png")
-                raise_captcha_bypass_error()
+                logger.debug("Challenge detected")
+                sb.uc_gui_click_captcha()
+                logger.info("Clicked captcha")
+                time.sleep(5)  # Wait for challenge completion
+                
+                source = sb.get_page_source()
+                if "Just a moment" in source or "challenge-running" in source:
+                    sb.save_screenshot(f"./screenshots/{request.url}.png")
+                    raise_captcha_bypass_error()
 
             # Handle POST request if needed
             if request.cmd == "request.post" and request.postData:
                 script = f"""
                 return fetch('{request.url}', {{
                     method: 'POST',
-                    headers: {json.dumps(headers)},
+                    headers: {json.dumps(request.headers)},
                     body: JSON.stringify({json.dumps(request.postData)}),
-                    credentials: 'include',
-                    mode: 'cors'
+                    credentials: 'include'
                 }}).then(response => response.text())
                   .catch(error => 'Error: ' + error.message);
                 """
                 source = sb.execute_script(script)
+
+            # Update cookies for future requests
+            cookies = current_cookies
 
             response = LinkResponse(
                 message="Success",
@@ -177,13 +125,12 @@ def read_item(request: LinkRequest) -> LinkResponse:
                     userAgent=sb.get_user_agent(),
                     url=sb.get_current_url(),
                     status=200,
-                    cookies=sb.get_cookies(),
-                    headers=headers if request.headers else {},
+                    cookies=cookies,
+                    headers=request.headers if request.headers else {},
                     response=source,
                 ),
                 startTimestamp=start_time,
             )
-            cookies = sb.get_cookies()
             return response
 
         except Exception as e:
