@@ -68,66 +68,92 @@ def read_item(request: LinkRequest) -> LinkResponse:
         try:
             sb: BaseCase
             
-            # Set headers for navigation
-            if request.headers:
-                sb.driver.execute_cdp_cmd('Network.setExtraHTTPHeaders', {
-                    'headers': request.headers
-                })
+            # First, let's bypass Cloudflare using a GET request
+            bypass_url = "/".join(request.url.split("/")[:3])  # Get base domain
+            logger.info(f"Attempting to bypass Cloudflare at: {bypass_url}")
             
-            global cookies  # noqa: PLW0603
+            global cookies
             if cookies:
-                sb.uc_open_with_reconnect(request.url)
                 sb.add_cookies(cookies)
-            sb.uc_open_with_reconnect(request.url)
+            
+            # Initial GET request to handle Cloudflare
+            sb.uc_open_with_reconnect(bypass_url)
+            time.sleep(3)  # Give it some time to load
+            
             source = sb.get_page_source()
             source_bs = BeautifulSoup(source, "html.parser")
             title_tag = source_bs.title
-            logger.debug(f"Got webpage: {request.url}")
+            
             if title_tag and title_tag.string in src.utils.consts.CHALLENGE_TITLES:
                 logger.debug("Challenge detected")
                 sb.uc_gui_click_captcha()
                 logger.info("Clicked captcha")
+                time.sleep(5)  # Wait for challenge completion
 
-            source = sb.get_page_source()
-            source_bs = BeautifulSoup(source, "html.parser")
-            title_tag = source_bs.title
+                source = sb.get_page_source()
+                source_bs = BeautifulSoup(source, "html.parser")
+                title_tag = source_bs.title
 
-            if title_tag and title_tag.string in src.utils.consts.CHALLENGE_TITLES:
-                sb.save_screenshot(f"./screenshots/{request.url}.png")
-                raise_captcha_bypass_error()
-
-            # If it's a POST request, use fetch API with headers
+                if title_tag and title_tag.string in src.utils.consts.CHALLENGE_TITLES:
+                    sb.save_screenshot(f"./screenshots/{bypass_url}.png")
+                    raise_captcha_bypass_error()
+            
+            # Store cookies after successful bypass
+            cookies = sb.get_cookies()
+            
+            # Now make the actual POST request with fetch
             if request.cmd == "request.post" and request.postData:
+                # Set up the headers for the fetch request
+                headers = request.headers or {}
+                
                 script = f"""
                 return fetch('{request.url}', {{
                     method: 'POST',
-                    headers: {json.dumps(request.headers)},
+                    headers: {json.dumps(headers)},
                     body: JSON.stringify({json.dumps(request.postData)}),
                     credentials: 'include'
-                }}).then(response => response.text())
-                  .catch(error => 'Error: ' + error.message);
+                }}).then(async response => {{
+                    const text = await response.text();
+                    return JSON.stringify({{
+                        status: response.status,
+                        text: text
+                    }});
+                }}).catch(error => JSON.stringify({{
+                    status: 500,
+                    text: 'Error: ' + error.message
+                }}));
                 """
-                source = sb.execute_script(script)
+                result = sb.execute_script(script)
+                try:
+                    result_json = json.loads(result)
+                    source = result_json['text']
+                    status = result_json['status']
+                except:
+                    source = result
+                    status = 200
+            else:
+                source = sb.get_page_source()
+                status = 200
 
             response = LinkResponse(
                 message="Success",
                 solution=Solution(
                     userAgent=sb.get_user_agent(),
                     url=sb.get_current_url(),
-                    status=200,
-                    cookies=sb.get_cookies(),
+                    status=status,
+                    cookies=cookies,
                     headers=request.headers if request.headers else {},
                     response=source,
                 ),
                 startTimestamp=start_time,
             )
-            cookies = sb.get_cookies()
+            
         except Exception as e:
             logger.error(f"Error: {e}")
             if sb.driver:
                 sb.driver.quit()
             raise HTTPException(
-                status_code=500, detail="Unknown error, check logs"
+                status_code=500, detail=str(e)
             ) from e
 
     return response
