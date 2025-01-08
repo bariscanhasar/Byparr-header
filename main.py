@@ -81,24 +81,36 @@ def read_item(request: LinkRequest) -> LinkResponse:
             
             # Handle Cloudflare challenge
             max_retries = 3
-            for _ in range(max_retries):
+            for attempt in range(max_retries):
                 source = sb.get_page_source()
                 source_bs = BeautifulSoup(source, "html.parser")
                 title_tag = source_bs.title
                 
+                logger.info(f"Checking page title (attempt {attempt + 1}/{max_retries})")
+                if title_tag:
+                    logger.info(f"Page title: {title_tag.string}")
+                
                 if not (title_tag and title_tag.string in src.utils.consts.CHALLENGE_TITLES):
+                    logger.info("No challenge detected, proceeding...")
                     break
                 
-                logger.debug("Challenge detected")
-                sb.uc_gui_click_captcha()
-                logger.info("Clicked captcha")
+                logger.info("Challenge detected, attempting to solve...")
+                try:
+                    sb.uc_gui_click_captcha()
+                    logger.info("Clicked captcha")
+                except Exception as e:
+                    logger.error(f"Failed to click captcha: {e}")
+                
                 time.sleep(3)
+                logger.info("Waiting after captcha click...")
             
             # Store cookies after bypass
             cookies = sb.get_cookies()
+            logger.info(f"Stored {len(cookies)} cookies")
             
             # Now handle the POST request in a new tab
             if request.cmd == "request.post" and request.postData:
+                logger.info("Handling POST request in new tab...")
                 # Create a new tab
                 sb.driver.execute_script("window.open('about:blank', '_blank');")
                 sb.driver.switch_to.window(sb.driver.window_handles[-1])
@@ -108,12 +120,14 @@ def read_item(request: LinkRequest) -> LinkResponse:
                     sb.add_cookie(cookie)
                 
                 # Navigate to the URL first
+                logger.info(f"Navigating to POST URL: {request.url}")
                 sb.uc_open_with_reconnect(request.url)
                 
                 # Prepare the POST request
                 headers_str = json.dumps(request.headers)
                 post_data_str = json.dumps(request.postData)
                 
+                logger.info("Executing POST request...")
                 script = f"""
                 async function makeRequest() {{
                     try {{
@@ -145,6 +159,7 @@ def read_item(request: LinkRequest) -> LinkResponse:
                 makeRequest().then(callback);
                 """)
                 
+                logger.info(f"POST request result: {result}")
                 source = result.get('text', '')
                 status = result.get('status', 500)
                 
@@ -170,6 +185,7 @@ def read_item(request: LinkRequest) -> LinkResponse:
             
         except Exception as e:
             logger.error(f"Error: {e}")
+            logger.error(f"Full error details: {str(e)}")
             if sb.driver:
                 sb.driver.quit()
             raise HTTPException(
