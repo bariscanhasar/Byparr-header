@@ -157,7 +157,7 @@ def read_item(request: LinkRequest) -> LinkResponse:
                     userAgent=sb.get_user_agent(),
                     url=sb.get_current_url(),
                     status=status,
-                    cookies={},  # No need to store cookies
+                    cookies=[],  # Empty list instead of empty dict
                     headers=request.headers if request.headers else {},
                     response=source,
                 ),
