@@ -72,10 +72,6 @@ def read_item(request: LinkRequest) -> LinkResponse:
             bypass_url = "/".join(request.url.split("/")[:3])  # Get base domain
             logger.info(f"Attempting to bypass Cloudflare at: {bypass_url}")
             
-            global cookies
-            if cookies:
-                sb.add_cookies(cookies)
-            
             # Initial visit to handle Cloudflare
             sb.uc_open_with_reconnect(bypass_url)
             
@@ -104,89 +100,56 @@ def read_item(request: LinkRequest) -> LinkResponse:
                 time.sleep(3)
                 logger.info("Waiting after captcha click...")
             
-            # Store cookies after bypass
-            cookies = sb.get_cookies()
-            logger.info(f"Stored {len(cookies)} cookies")
-            
-            # Now handle the POST request in a new tab
+            # Now make the POST request with required headers
             if request.cmd == "request.post" and request.postData:
-                logger.info("Handling POST request in new tab...")
-                # Create a new tab
-                sb.driver.execute_script("window.open('about:blank', '_blank');")
-                sb.driver.switch_to.window(sb.driver.window_handles[-1])
+                logger.info("Preparing POST request...")
                 
-                # Navigate to the URL first (before adding cookies)
-                logger.info(f"Navigating to POST URL: {request.url}")
-                sb.uc_open_with_reconnect(request.url)
+                # Ensure required headers are present
+                headers = request.headers or {}
+                if 'authorization' not in {k.lower(): v for k, v in headers.items()}:
+                    logger.warning("Authorization header missing")
                 
-                # Add cookies to new tab with proper domain
-                target_domain = request.url.split("/")[2]  # Get domain from URL
-                for cookie in cookies:
-                    try:
-                        cookie_data = {
-                            'name': cookie['name'],
-                            'value': cookie['value'],
-                            'domain': target_domain
-                        }
-                        # Add optional cookie attributes if they exist
-                        for attr in ['path', 'secure', 'expiry']:
-                            if attr in cookie:
-                                cookie_data[attr] = cookie[attr]
-                        sb.driver.add_cookie(cookie_data)
-                        logger.info(f"Added cookie: {cookie['name']} for domain {target_domain}")
-                    except Exception as e:
-                        logger.warning(f"Failed to add cookie {cookie['name']}: {e}")
-                
-                # Refresh page after adding cookies
-                sb.driver.refresh()
-                time.sleep(1)
-                
-                # Prepare the POST request
-                headers_str = json.dumps(request.headers)
-                post_data_str = json.dumps(request.postData)
-                
-                logger.info("Executing POST request...")
                 script = f"""
                 async function makeRequest() {{
                     try {{
                         const response = await fetch('{request.url}', {{
                             method: 'POST',
-                            headers: {headers_str},
-                            body: JSON.stringify({post_data_str}),
-                            credentials: 'include'
+                            headers: {json.dumps(headers)},
+                            body: JSON.stringify({json.dumps(request.postData)}),
                         }});
                         
                         const text = await response.text();
                         return {{
                             status: response.status,
-                            text: text
+                            text: text,
+                            headers: Object.fromEntries([...response.headers])
                         }};
                     }} catch (error) {{
                         return {{
                             status: 500,
-                            text: 'Error: ' + error.message
+                            text: 'Error: ' + error.message,
+                            headers: {{}}
                         }};
                     }}
                 }}
                 return makeRequest();
                 """
                 
+                logger.info("Executing POST request...")
                 result = sb.driver.execute_async_script("""
                 const callback = arguments[arguments.length - 1];
                 const makeRequest = """ + script + """
                 makeRequest().then(callback);
                 """)
                 
-                logger.info(f"POST request result: {result}")
+                logger.info(f"POST request completed with status: {result.get('status', 'unknown')}")
                 source = result.get('text', '')
                 status = result.get('status', 500)
-                
-                # Close the tab
-                sb.driver.close()
-                sb.driver.switch_to.window(sb.driver.window_handles[0])
+                response_headers = result.get('headers', {})
             else:
                 source = sb.get_page_source()
                 status = 200
+                response_headers = {}
 
             response = LinkResponse(
                 message="Success",
@@ -194,7 +157,7 @@ def read_item(request: LinkRequest) -> LinkResponse:
                     userAgent=sb.get_user_agent(),
                     url=sb.get_current_url(),
                     status=status,
-                    cookies=cookies,
+                    cookies={},  # No need to store cookies
                     headers=request.headers if request.headers else {},
                     response=source,
                 ),
