@@ -72,6 +72,8 @@ def read_item(request: LinkRequest) -> LinkResponse:
         ad_block=True,
         xvfb=USE_XVFB,
         headless=USE_HEADLESS,
+        page_load_strategy='eager',
+        uc_cdp=True,
     ) as sb:
         try:
             # Set custom headers
@@ -83,37 +85,44 @@ def read_item(request: LinkRequest) -> LinkResponse:
 
             global cookies
             if cookies:
-                sb.uc_open_with_reconnect(request.url)
                 sb.add_cookies(cookies)
             
-            # Always use uc_open_with_reconnect for Cloudflare bypass
+            # First visit to handle Cloudflare
             sb.uc_open_with_reconnect(request.url)
             
-            # Handle Cloudflare challenge if present
-            source = sb.get_page_source()
-            source_bs = BeautifulSoup(source, "html.parser")
-            title_tag = source_bs.title
-            
-            if title_tag and title_tag.string in src.utils.consts.CHALLENGE_TITLES:
-                logger.debug("Challenge detected")
-                sb.uc_gui_click_captcha()
-                logger.info("Clicked captcha")
-                
+            # Wait for Cloudflare challenge to complete (up to 30 seconds)
+            max_wait = 30
+            start = time.time()
+            while time.time() - start < max_wait:
                 source = sb.get_page_source()
                 source_bs = BeautifulSoup(source, "html.parser")
                 title_tag = source_bs.title
                 
-                if title_tag and title_tag.string in src.utils.consts.CHALLENGE_TITLES:
-                    sb.save_screenshot(f"./screenshots/{request.url}.png")
-                    raise_captcha_bypass_error()
-
+                if not title_tag or title_tag.string not in src.utils.consts.CHALLENGE_TITLES:
+                    break  # Challenge completed
+                
+                if "Just a moment" in source:
+                    logger.info("Waiting for Cloudflare challenge to complete...")
+                    time.sleep(2)
+                    continue
+                
+                # Try to solve challenge if interactive elements are present
+                try:
+                    sb.uc_gui_click_captcha()
+                    logger.info("Clicked captcha")
+                except:
+                    pass
+                
+                time.sleep(2)
+            
             # After bypass, if it's a POST request, execute it
             if request.cmd == "request.post" and request.postData:
                 script = f"""
                 return fetch('{request.url}', {{
                     method: 'POST',
                     headers: {json.dumps(request.headers)} || {{}},
-                    body: JSON.stringify({json.dumps(request.postData)})
+                    body: JSON.stringify({json.dumps(request.postData)}),
+                    credentials: 'include'
                 }}).then(response => response.text());
                 """
                 source = sb.execute_script(script)
