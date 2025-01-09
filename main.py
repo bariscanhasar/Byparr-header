@@ -101,6 +101,7 @@ def read_item(request: LinkRequest) -> LinkResponse:
                 time.sleep(3)
                 logger.info("Waiting after captcha click...")
             
+            time.sleep(5)
             # Get cookies from selenium
             selenium_cookies = sb.get_cookies()
             
