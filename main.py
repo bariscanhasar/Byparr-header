@@ -80,6 +80,7 @@ def read_item(request: LinkRequest) -> LinkResponse:
             max_retries = 3
             cloudflare_cookies = None
             cf_clearance = None
+            challenge_detected = False
             
             for attempt in range(max_retries):
                 source = sb.get_page_source()
@@ -98,6 +99,7 @@ def read_item(request: LinkRequest) -> LinkResponse:
                                        if cookie['name'] == 'cf_clearance'), None)
                     break
                 
+                challenge_detected = True
                 logger.info("Challenge detected, attempting to solve...")
                 try:
                     sb.uc_gui_click_captcha()
@@ -108,19 +110,25 @@ def read_item(request: LinkRequest) -> LinkResponse:
                 time.sleep(3)
                 logger.info("Waiting after captcha click...")
             
-            if not cf_clearance:
-                raise Exception("Failed to get Cloudflare clearance")
-                
-            logger.info(f"Got cf_clearance: {cf_clearance}")
+            # Get all cookies even if cf_clearance is not present
+            if not cloudflare_cookies:
+                cloudflare_cookies = sb.get_cookies()
+            
+            logger.info(f"Got cookies: {len(cloudflare_cookies)}")
+            if cf_clearance:
+                logger.info(f"Got cf_clearance: {cf_clearance}")
             
             # Now make the POST request in the same browser context
             if request.cmd == "request.post" and request.postData:
                 logger.info("Making POST request in browser...")
                 
-                # Add Cloudflare cookies to headers
+                # Add all cookies to headers
                 headers = request.headers.copy() if request.headers else {}
+                cookie_str = '; '.join([f"{cookie['name']}={cookie['value']}" 
+                                      for cookie in cloudflare_cookies])
+                
                 headers.update({
-                    'Cookie': f'cf_clearance={cf_clearance}',
+                    'Cookie': cookie_str,
                     'User-Agent': sb.get_user_agent()
                 })
                 
