@@ -4,6 +4,7 @@ import logging
 import time
 from http import HTTPStatus
 import json
+import requests
 
 import uvicorn
 from bs4 import BeautifulSoup
@@ -68,11 +69,12 @@ def read_item(request: LinkRequest) -> LinkResponse:
         try:
             sb: BaseCase
             
-            # First bypass Cloudflare on the actual URL
-            logger.info(f"Attempting to bypass Cloudflare at: {request.url}")
+            # First bypass Cloudflare
+            bypass_url = "/".join(request.url.split("/")[:3])  # Get base domain
+            logger.info(f"Attempting to bypass Cloudflare at: {bypass_url}")
             
             # Initial visit to handle Cloudflare
-            sb.uc_open_with_reconnect(request.url)
+            sb.uc_open_with_reconnect(bypass_url)
             
             # Handle Cloudflare challenge
             max_retries = 3
@@ -99,73 +101,29 @@ def read_item(request: LinkRequest) -> LinkResponse:
                 time.sleep(3)
                 logger.info("Waiting after captcha click...")
             
-            # Now make the POST request using form submission
+            # Get cookies from selenium
+            selenium_cookies = sb.get_cookies()
+            
+            # Convert selenium cookies to requests format
+            cookies_dict = {cookie['name']: cookie['value'] for cookie in selenium_cookies}
+            
+            # Now make the POST request using requests library
             if request.cmd == "request.post" and request.postData:
-                logger.info("Preparing POST request...")
+                logger.info("Making POST request with requests library...")
                 
-                # Create a form and submit it via JavaScript
-                headers_str = json.dumps(request.headers)
-                post_data_str = json.dumps(request.postData)
-                
-                script = f"""
-                // Create form
-                const form = document.createElement('form');
-                form.method = 'POST';
-                form.action = '{request.url}';
-
-                // Add headers as hidden fields
-                const headers = {headers_str};
-                for (const [key, value] of Object.entries(headers)) {{
-                    const input = document.createElement('input');
-                    input.type = 'hidden';
-                    input.name = `_headers_${{key}}`;
-                    input.value = value;
-                    form.appendChild(input);
-                }}
-
-                // Add post data as hidden field
-                const dataInput = document.createElement('input');
-                dataInput.type = 'hidden';
-                dataInput.name = '_post_data';
-                dataInput.value = JSON.stringify({post_data_str});
-                form.appendChild(dataInput);
-
-                // Add to document and submit
-                document.body.appendChild(form);
-                
-                return new Promise((resolve) => {{
-                    form.onsubmit = (e) => {{
-                        e.preventDefault();
-                        const formData = new FormData(form);
-                        fetch(form.action, {{
-                            method: 'POST',
-                            headers: {headers_str},
-                            body: JSON.stringify({post_data_str})
-                        }})
-                        .then(response => response.text())
-                        .then(text => {{
-                            resolve({{
-                                status: 200,
-                                text: text
-                            }});
-                        }})
-                        .catch(error => {{
-                            resolve({{
-                                status: 500,
-                                text: 'Error: ' + error.message
-                            }});
-                        }});
-                    }};
-                    form.submit();
-                }});
-                """
-                
-                logger.info("Executing POST request via form submission...")
                 try:
-                    result = sb.execute_script(script)
-                    logger.info(f"POST request completed with status: {result.get('status', 'unknown')}")
-                    source = result.get('text', '')
-                    status = result.get('status', 500)
+                    r = requests.post(
+                        request.url,
+                        json=request.postData,  # This will automatically JSON encode the data
+                        headers=request.headers,
+                        cookies=cookies_dict,
+                        timeout=30
+                    )
+                    
+                    logger.info(f"POST request completed with status: {r.status_code}")
+                    source = r.text
+                    status = r.status_code
+                    
                 except Exception as e:
                     logger.error(f"POST request failed: {e}")
                     source = str(e)
