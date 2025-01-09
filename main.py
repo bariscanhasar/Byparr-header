@@ -78,6 +78,9 @@ def read_item(request: LinkRequest) -> LinkResponse:
             
             # Handle Cloudflare challenge
             max_retries = 3
+            cloudflare_cookies = None
+            cf_clearance = None
+            
             for attempt in range(max_retries):
                 source = sb.get_page_source()
                 source_bs = BeautifulSoup(source, "html.parser")
@@ -89,6 +92,10 @@ def read_item(request: LinkRequest) -> LinkResponse:
                 
                 if not (title_tag and title_tag.string in src.utils.consts.CHALLENGE_TITLES):
                     logger.info("No challenge detected, proceeding...")
+                    # Get Cloudflare cookies after successful bypass
+                    cloudflare_cookies = sb.get_cookies()
+                    cf_clearance = next((cookie['value'] for cookie in cloudflare_cookies 
+                                       if cookie['name'] == 'cf_clearance'), None)
                     break
                 
                 logger.info("Challenge detected, attempting to solve...")
@@ -101,56 +108,66 @@ def read_item(request: LinkRequest) -> LinkResponse:
                 time.sleep(3)
                 logger.info("Waiting after captcha click...")
             
-            # Wait for page to be fully loaded
-            logger.info("Waiting for page to be fully loaded...")
-            sb.wait_for_ready_state_complete()
-            time.sleep(2)  # Additional wait for Next.js hydration
+            if not cf_clearance:
+                raise Exception("Failed to get Cloudflare clearance")
+                
+            logger.info(f"Got cf_clearance: {cf_clearance}")
             
             # Now make the POST request in the same browser context
             if request.cmd == "request.post" and request.postData:
                 logger.info("Making POST request in browser...")
                 
-                # Wait for any potential page transitions
-                wait_script = """
-                return new Promise((resolve) => {
-                    if (document.readyState === 'complete') {
-                        resolve(true);
-                    } else {
-                        window.addEventListener('load', () => resolve(true));
-                    }
-                });
-                """
-                sb.execute_script(wait_script)
+                # Add Cloudflare cookies to headers
+                headers = request.headers.copy() if request.headers else {}
+                headers.update({
+                    'Cookie': f'cf_clearance={cf_clearance}',
+                    'User-Agent': sb.get_user_agent()
+                })
                 
-                # Prepare the fetch request with proper headers and data
-                headers_str = json.dumps(request.headers)
+                headers_str = json.dumps(headers)
                 post_data_str = json.dumps(request.postData)
                 
                 script = f"""
                 return (async () => {{
                     try {{
-                        // Wait for Next.js hydration
-                        if (window.__NEXT_DATA__) {{
-                            await new Promise(resolve => setTimeout(resolve, 1000));
-                        }}
-                        
                         const response = await fetch('{request.url}', {{
                             method: 'POST',
                             headers: {headers_str},
                             body: JSON.stringify({post_data_str}),
                             credentials: 'include',
-                            mode: 'cors',
-                            cache: 'no-cache'
+                            mode: 'cors'
                         }});
                         
                         const text = await response.text();
-                        const headers = Object.fromEntries(response.headers);
+                        const responseHeaders = Object.fromEntries([...response.headers]);
+                        
+                        // Check if we got a challenge response
+                        if (responseHeaders['cf-chl-out']) {{
+                            // Add cf-chl-out to next request
+                            const nextResponse = await fetch('{request.url}', {{
+                                method: 'POST',
+                                headers: {{
+                                    ...{headers_str},
+                                    'cf-chl-out': responseHeaders['cf-chl-out']
+                                }},
+                                body: JSON.stringify({post_data_str}),
+                                credentials: 'include',
+                                mode: 'cors'
+                            }});
+                            
+                            return {{
+                                status: nextResponse.status,
+                                text: await nextResponse.text(),
+                                ok: nextResponse.ok,
+                                headers: Object.fromEntries([...nextResponse.headers])
+                            }};
+                        }}
                         
                         return {{
                             status: response.status,
                             text: text,
                             ok: response.ok,
-                            headers: headers
+                            headers: responseHeaders
                         }};
                     }} catch (error) {{
                         console.error('Fetch error:', error);
@@ -175,7 +192,6 @@ def read_item(request: LinkRequest) -> LinkResponse:
                     status = result.get('status', 500)
                     response_headers = result.get('headers', {})
                     
-                    # Log response for debugging
                     logger.info(f"Response headers: {response_headers}")
                     logger.info(f"Response preview: {source[:200]}...")
                     
