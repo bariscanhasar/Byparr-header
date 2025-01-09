@@ -101,9 +101,26 @@ def read_item(request: LinkRequest) -> LinkResponse:
                 time.sleep(3)
                 logger.info("Waiting after captcha click...")
             
+            # Wait for page to be fully loaded
+            logger.info("Waiting for page to be fully loaded...")
+            sb.wait_for_ready_state_complete()
+            time.sleep(2)  # Additional wait for Next.js hydration
+            
             # Now make the POST request in the same browser context
             if request.cmd == "request.post" and request.postData:
                 logger.info("Making POST request in browser...")
+                
+                # Wait for any potential page transitions
+                wait_script = """
+                return new Promise((resolve) => {
+                    if (document.readyState === 'complete') {
+                        resolve(true);
+                    } else {
+                        window.addEventListener('load', () => resolve(true));
+                    }
+                });
+                """
+                sb.execute_script(wait_script)
                 
                 # Prepare the fetch request with proper headers and data
                 headers_str = json.dumps(request.headers)
@@ -112,24 +129,36 @@ def read_item(request: LinkRequest) -> LinkResponse:
                 script = f"""
                 return (async () => {{
                     try {{
+                        // Wait for Next.js hydration
+                        if (window.__NEXT_DATA__) {{
+                            await new Promise(resolve => setTimeout(resolve, 1000));
+                        }}
+                        
                         const response = await fetch('{request.url}', {{
                             method: 'POST',
                             headers: {headers_str},
                             body: JSON.stringify({post_data_str}),
-                            credentials: 'include'
+                            credentials: 'include',
+                            mode: 'cors',
+                            cache: 'no-cache'
                         }});
                         
                         const text = await response.text();
+                        const headers = Object.fromEntries(response.headers);
+                        
                         return {{
                             status: response.status,
                             text: text,
-                            ok: response.ok
+                            ok: response.ok,
+                            headers: headers
                         }};
                     }} catch (error) {{
+                        console.error('Fetch error:', error);
                         return {{
                             status: 500,
                             text: error.toString(),
-                            ok: false
+                            ok: false,
+                            headers: {{}}
                         }};
                     }}
                 }})();
@@ -144,13 +173,11 @@ def read_item(request: LinkRequest) -> LinkResponse:
                     
                     source = result.get('text', '')
                     status = result.get('status', 500)
+                    response_headers = result.get('headers', {})
                     
-                    # If we got another challenge, try to handle it
-                    if "Just a moment..." in source:
-                        logger.info("Got another challenge, waiting...")
-                        time.sleep(5)  # Wait a bit
-                        source = sb.get_page_source()
-                        status = 200
+                    # Log response for debugging
+                    logger.info(f"Response headers: {response_headers}")
+                    logger.info(f"Response preview: {source[:200]}...")
                     
                 except Exception as e:
                     logger.error(f"Browser request failed: {e}")
