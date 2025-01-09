@@ -79,7 +79,6 @@ def read_item(request: LinkRequest) -> LinkResponse:
             # Handle Cloudflare challenge
             max_retries = 3
             cloudflare_cookies = None
-            cf_clearance = None
             challenge_detected = False
             
             for attempt in range(max_retries):
@@ -93,10 +92,6 @@ def read_item(request: LinkRequest) -> LinkResponse:
                 
                 if not (title_tag and title_tag.string in src.utils.consts.CHALLENGE_TITLES):
                     logger.info("No challenge detected, proceeding...")
-                    # Get Cloudflare cookies after successful bypass
-                    cloudflare_cookies = sb.get_cookies()
-                    cf_clearance = next((cookie['value'] for cookie in cloudflare_cookies 
-                                       if cookie['name'] == 'cf_clearance'), None)
                     break
                 
                 challenge_detected = True
@@ -110,26 +105,53 @@ def read_item(request: LinkRequest) -> LinkResponse:
                 time.sleep(3)
                 logger.info("Waiting after captcha click...")
             
-            # Get all cookies even if cf_clearance is not present
-            if not cloudflare_cookies:
-                cloudflare_cookies = sb.get_cookies()
+            # First make a GET request to establish session
+            logger.info("Making initial GET request...")
+            sb.get(request.url)
+            time.sleep(2)  # Wait for any redirects
             
-            logger.info(f"Got cookies: {len(cloudflare_cookies)}")
-            if cf_clearance:
-                logger.info(f"Got cf_clearance: {cf_clearance}")
+            # Get all cookies after GET request
+            cloudflare_cookies = sb.get_cookies()
+            logger.info(f"Got cookies after GET: {len(cloudflare_cookies)}")
             
             # Now make the POST request in the same browser context
             if request.cmd == "request.post" and request.postData:
                 logger.info("Making POST request in browser...")
                 
-                # Add all cookies to headers
+                # Add all cookies and headers
                 headers = request.headers.copy() if request.headers else {}
                 cookie_str = '; '.join([f"{cookie['name']}={cookie['value']}" 
                                       for cookie in cloudflare_cookies])
                 
+                # Get current page's headers
+                current_headers = sb.execute_script("""
+                    const headers = {};
+                    const observer = new PerformanceObserver((list) => {
+                        for (const entry of list.getEntries()) {
+                            if (entry.name === window.location.href) {
+                                entry.responseHeaders.split('\\r\\n').forEach(line => {
+                                    const [key, value] = line.split(': ');
+                                    if (key && value) headers[key.toLowerCase()] = value;
+                                });
+                            }
+                        }
+                    });
+                    observer.observe({ entryTypes: ['resource'] });
+                    return headers;
+                """)
+                
+                # Add important headers
                 headers.update({
                     'Cookie': cookie_str,
-                    'User-Agent': sb.get_user_agent()
+                    'User-Agent': sb.get_user_agent(),
+                    'Referer': sb.get_current_url(),
+                    'Origin': "/".join(request.url.split("/")[:3]),
+                    'sec-ch-ua': current_headers.get('sec-ch-ua', ''),
+                    'sec-ch-ua-mobile': current_headers.get('sec-ch-ua-mobile', '?0'),
+                    'sec-ch-ua-platform': current_headers.get('sec-ch-ua-platform', ''),
+                    'Sec-Fetch-Dest': 'empty',
+                    'Sec-Fetch-Mode': 'cors',
+                    'Sec-Fetch-Site': 'same-origin'
                 })
                 
                 headers_str = json.dumps(headers)
@@ -143,33 +165,12 @@ def read_item(request: LinkRequest) -> LinkResponse:
                             headers: {headers_str},
                             body: JSON.stringify({post_data_str}),
                             credentials: 'include',
-                            mode: 'cors'
+                            mode: 'cors',
+                            cache: 'no-cache'
                         }});
                         
                         const text = await response.text();
                         const responseHeaders = Object.fromEntries([...response.headers]);
-                        
-                        // Check if we got a challenge response
-                        if (responseHeaders['cf-chl-out']) {{
-                            // Add cf-chl-out to next request
-                            const nextResponse = await fetch('{request.url}', {{
-                                method: 'POST',
-                                headers: {{
-                                    ...{headers_str},
-                                    'cf-chl-out': responseHeaders['cf-chl-out']
-                                }},
-                                body: JSON.stringify({post_data_str}),
-                                credentials: 'include',
-                                mode: 'cors'
-                            }});
-                            
-                            return {{
-                                status: nextResponse.status,
-                                text: await nextResponse.text(),
-                                ok: nextResponse.ok,
-                                headers: Object.fromEntries([...nextResponse.headers])
-                            }};
-                        }}
                         
                         return {{
                             status: response.status,
