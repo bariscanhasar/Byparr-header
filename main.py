@@ -101,32 +101,59 @@ def read_item(request: LinkRequest) -> LinkResponse:
                 time.sleep(3)
                 logger.info("Waiting after captcha click...")
             
-            time.sleep(5)
-            # Get cookies from selenium
-            selenium_cookies = sb.get_cookies()
-            
-            # Convert selenium cookies to requests format
-            cookies_dict = {cookie['name']: cookie['value'] for cookie in selenium_cookies}
-            
-            # Now make the POST request using requests library
+            # Now make the POST request in the same browser context
             if request.cmd == "request.post" and request.postData:
-                logger.info("Making POST request with requests library...")
+                logger.info("Making POST request in browser...")
+                
+                # Prepare the fetch request with proper headers and data
+                headers_str = json.dumps(request.headers)
+                post_data_str = json.dumps(request.postData)
+                
+                script = f"""
+                return (async () => {{
+                    try {{
+                        const response = await fetch('{request.url}', {{
+                            method: 'POST',
+                            headers: {headers_str},
+                            body: JSON.stringify({post_data_str}),
+                            credentials: 'include'
+                        }});
+                        
+                        const text = await response.text();
+                        return {{
+                            status: response.status,
+                            text: text,
+                            ok: response.ok
+                        }};
+                    }} catch (error) {{
+                        return {{
+                            status: 500,
+                            text: error.toString(),
+                            ok: false
+                        }};
+                    }}
+                }})();
+                """
                 
                 try:
-                    r = requests.post(
-                        request.url,
-                        json=request.postData,  # This will automatically JSON encode the data
-                        headers=request.headers,
-                        cookies=cookies_dict,
-                        timeout=30
-                    )
+                    logger.info("Executing fetch request...")
+                    result = sb.execute_script(script)
                     
-                    logger.info(f"POST request completed with status: {r.status_code}")
-                    source = r.text
-                    status = r.status_code
+                    logger.info(f"Request completed with status: {result.get('status')}")
+                    logger.info(f"Request success: {result.get('ok', False)}")
+                    
+                    source = result.get('text', '')
+                    status = result.get('status', 500)
+                    
+                    # If we got another challenge, try to handle it
+                    if "Just a moment..." in source:
+                        logger.info("Got another challenge, waiting...")
+                        time.sleep(5)  # Wait a bit
+                        source = sb.get_page_source()
+                        status = 200
                     
                 except Exception as e:
-                    logger.error(f"POST request failed: {e}")
+                    logger.error(f"Browser request failed: {e}")
                     source = str(e)
                     status = 500
             else:
