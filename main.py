@@ -78,9 +78,6 @@ def read_item(request: LinkRequest) -> LinkResponse:
             
             # Handle Cloudflare challenge
             max_retries = 3
-            cloudflare_cookies = None
-            challenge_detected = False
-            
             for attempt in range(max_retries):
                 source = sb.get_page_source()
                 source_bs = BeautifulSoup(source, "html.parser")
@@ -94,7 +91,6 @@ def read_item(request: LinkRequest) -> LinkResponse:
                     logger.info("No challenge detected, proceeding...")
                     break
                 
-                challenge_detected = True
                 logger.info("Challenge detected, attempting to solve...")
                 try:
                     sb.uc_gui_click_captcha()
@@ -105,105 +101,113 @@ def read_item(request: LinkRequest) -> LinkResponse:
                 time.sleep(3)
                 logger.info("Waiting after captcha click...")
             
-            # First make a GET request to establish session
-            logger.info("Making initial GET request...")
-            sb.get(request.url)
-            time.sleep(2)  # Wait for any redirects
-            
-            # Get all cookies after GET request
-            cloudflare_cookies = sb.get_cookies()
-            logger.info(f"Got cookies after GET: {len(cloudflare_cookies)}")
-            
-            # Now make the POST request in the same browser context
+            # Now intercept and modify network requests
             if request.cmd == "request.post" and request.postData:
-                logger.info("Making POST request in browser...")
+                logger.info("Setting up request interception...")
                 
-                # Add all cookies and headers
+                # Inject request interceptor
+                script = """
+                window.responseData = null;
+                window.responseError = null;
+                
+                // Create XMLHttpRequest interceptor
+                const originalXHR = window.XMLHttpRequest;
+                window.XMLHttpRequest = function() {
+                    const xhr = new originalXHR();
+                    const originalOpen = xhr.open;
+                    const originalSend = xhr.send;
+                    
+                    xhr.open = function() {
+                        this.addEventListener('load', function() {
+                            window.responseData = {
+                                status: this.status,
+                                text: this.responseText,
+                                headers: this.getAllResponseHeaders()
+                            };
+                        });
+                        this.addEventListener('error', function(e) {
+                            window.responseError = e;
+                        });
+                        originalOpen.apply(this, arguments);
+                    };
+                    
+                    xhr.send = function() {
+                        originalSend.apply(this, arguments);
+                    };
+                    
+                    return xhr;
+                };
+                
+                // Create fetch interceptor
+                const originalFetch = window.fetch;
+                window.fetch = async function() {
+                    try {
+                        const response = await originalFetch.apply(this, arguments);
+                        const clone = response.clone();
+                        const text = await clone.text();
+                        window.responseData = {
+                            status: response.status,
+                            text: text,
+                            headers: Object.fromEntries([...response.headers])
+                        };
+                        return response;
+                    } catch (error) {
+                        window.responseError = error;
+                        throw error;
+                    }
+                };
+                """
+                
+                sb.execute_script(script)
+                
+                # Make the request
                 headers = request.headers.copy() if request.headers else {}
-                cookie_str = '; '.join([f"{cookie['name']}={cookie['value']}" 
-                                      for cookie in cloudflare_cookies])
-                
-                # Get current page's headers
-                current_headers = sb.execute_script("""
-                    const headers = {};
-                    const observer = new PerformanceObserver((list) => {
-                        for (const entry of list.getEntries()) {
-                            if (entry.name === window.location.href) {
-                                entry.responseHeaders.split('\\r\\n').forEach(line => {
-                                    const [key, value] = line.split(': ');
-                                    if (key && value) headers[key.toLowerCase()] = value;
-                                });
-                            }
-                        }
-                    });
-                    observer.observe({ entryTypes: ['resource'] });
-                    return headers;
-                """)
-                
-                # Add important headers
-                headers.update({
-                    'Cookie': cookie_str,
-                    'User-Agent': sb.get_user_agent(),
-                    'Referer': sb.get_current_url(),
-                    'Origin': "/".join(request.url.split("/")[:3]),
-                    'sec-ch-ua': current_headers.get('sec-ch-ua', ''),
-                    'sec-ch-ua-mobile': current_headers.get('sec-ch-ua-mobile', '?0'),
-                    'sec-ch-ua-platform': current_headers.get('sec-ch-ua-platform', ''),
-                    'Sec-Fetch-Dest': 'empty',
-                    'Sec-Fetch-Mode': 'cors',
-                    'Sec-Fetch-Site': 'same-origin'
-                })
-                
                 headers_str = json.dumps(headers)
                 post_data_str = json.dumps(request.postData)
                 
-                script = f"""
-                return (async () => {{
-                    try {{
-                        const response = await fetch('{request.url}', {{
-                            method: 'POST',
-                            headers: {headers_str},
-                            body: JSON.stringify({post_data_str}),
-                            credentials: 'include',
-                            mode: 'cors',
-                            cache: 'no-cache'
-                        }});
-                        
-                        const text = await response.text();
-                        const responseHeaders = Object.fromEntries([...response.headers]);
-                        
-                        return {{
-                            status: response.status,
-                            text: text,
-                            ok: response.ok,
-                            headers: responseHeaders
-                        }};
-                    }} catch (error) {{
-                        console.error('Fetch error:', error);
-                        return {{
-                            status: 500,
-                            text: error.toString(),
-                            ok: false,
-                            headers: {{}}
-                        }};
+                logger.info("Making intercepted request...")
+                
+                request_script = f"""
+                try {{
+                    const xhr = new XMLHttpRequest();
+                    xhr.open('POST', '{request.url}', false);  // Synchronous request
+                    
+                    // Set headers
+                    const headers = {headers_str};
+                    for (const [key, value] of Object.entries(headers)) {{
+                        xhr.setRequestHeader(key, value);
                     }}
-                }})();
+                    
+                    xhr.send(JSON.stringify({post_data_str}));
+                    
+                    return window.responseData;
+                }} catch (error) {{
+                    return {{
+                        status: 500,
+                        text: error.toString(),
+                        headers: {{}}
+                    }};
+                }}
                 """
                 
                 try:
-                    logger.info("Executing fetch request...")
-                    result = sb.execute_script(script)
+                    logger.info("Executing intercepted request...")
+                    result = sb.execute_script(request_script)
                     
-                    logger.info(f"Request completed with status: {result.get('status')}")
-                    logger.info(f"Request success: {result.get('ok', False)}")
-                    
-                    source = result.get('text', '')
-                    status = result.get('status', 500)
-                    response_headers = result.get('headers', {})
-                    
-                    logger.info(f"Response headers: {response_headers}")
-                    logger.info(f"Response preview: {source[:200]}...")
-                    
+                    if result:
+                        logger.info(f"Request completed with status: {result.get('status')}")
+                        source = result.get('text', '')
+                        status = result.get('status', 500)
+                        headers = result.get('headers', {})
+                        
+                        logger.info(f"Response headers: {headers}")
+                        logger.info(f"Response preview: {source[:200]}...")
+                    else:
+                        error = sb.execute_script("return window.responseError;")
+                        logger.error(f"Request failed: {error}")
+                        source = str(error)
+                        status = 500
+                        
                 except Exception as e:
                     logger.error(f"Browser request failed: {e}")
                     source = str(e)
